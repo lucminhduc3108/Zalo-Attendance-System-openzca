@@ -45,16 +45,23 @@ export const queryMissingRecords = {
     const missingCheckout = allRecords.filter((r) => r.status === 'missing_checkout');
     const lateRecords = allRecords.filter((r) => isLate(r.checkin));
 
+    // missing_checkin: only compute if needed (requires User model lookup)
+    let missingCheckin = [];
+    if (type === 'missing_checkin' || type === 'all') {
+      const { User } = await import('../../models/index.js');
+      const allUsers = await User.find({ isActive: true, role: 'employee' }).lean();
+      const checkedInIds = new Set(allRecords.map((r) => r.zaloId));
+      missingCheckin = allUsers.filter((u) => !checkedInIds.has(u.zaloId));
+    }
+
     // missing_checkout: have checkin but no checkout
-    if (type === 'missing_checkout' || type === 'all') {
-      if (type === 'missing_checkout') {
-        if (missingCheckout.length === 0)
-          return `✅ Tất cả nhân viên đã checkout ngày ${targetDate}.`;
-        const lines = missingCheckout.map(
-          (r) => `🟡 ${r.userName} — checkin ${timeString(r.checkin)}, chưa checkout`
-        );
-        return `⚠️ Nhân viên chưa checkout ngày ${targetDate}:\n${lines.join('\n')}`;
-      }
+    if (type === 'missing_checkout') {
+      if (missingCheckout.length === 0)
+        return `✅ Tất cả nhân viên đã checkout ngày ${targetDate}.`;
+      const lines = missingCheckout.map(
+        (r) => `🟡 ${r.userName} — checkin ${timeString(r.checkin)}, chưa checkout`
+      );
+      return `⚠️ Nhân viên chưa checkout ngày ${targetDate}:\n${lines.join('\n')}`;
     }
 
     // late: checkin after 9:00 AM
@@ -67,27 +74,19 @@ export const queryMissingRecords = {
     }
 
     // missing_checkin: no checkin record at all for someone who should have checked in
-    if (type === 'missing_checkin' || type === 'all') {
-      // Compare with registered users from User model
-      const { User } = await import('../../models/index.js');
-      const allUsers = await User.find({ isActive: true, role: 'employee' }).lean();
-      const checkedInIds = new Set(allRecords.map((r) => r.zaloId));
-      const missingCheckin = allUsers.filter((u) => !checkedInIds.has(u.zaloId));
-      if (type === 'missing_checkin') {
-        if (missingCheckin.length === 0)
-          return `✅ Tất cả nhân viên đã checkin ngày ${targetDate}.`;
-        const lines = missingCheckin.map((u) => `🔴 ${u.zaloName}`);
-        return `🔴 Nhân viên chưa checkin ngày ${targetDate}:\n${lines.join('\n')}`;
-      }
+    if (type === 'missing_checkin') {
+      if (missingCheckin.length === 0)
+        return `✅ Tất cả nhân viên đã checkin ngày ${targetDate}.`;
+      const lines = missingCheckin.map((u) => `🔴 ${u.zaloName}`);
+      return `🔴 Nhân viên chưa checkin ngày ${targetDate}:\n${lines.join('\n')}`;
     }
 
-    // "all" type: return all categories
-
-    if (missingCheckout.length === 0 && lateRecords.length === 0) {
-      return `✅ Không có bất thường nào ngày ${targetDate}.`;
-    }
-
+    // "all" type: return all three categories
     const lines = [];
+    if (missingCheckin.length > 0) {
+      lines.push(`🔴 Chưa checkin (${missingCheckin.length}):`);
+      missingCheckin.forEach((u) => lines.push(`   🔴 ${u.zaloName}`));
+    }
     if (missingCheckout.length > 0) {
       lines.push(`⚠️ Chưa checkout (${missingCheckout.length}):`);
       missingCheckout.forEach((r) =>
@@ -100,7 +99,7 @@ export const queryMissingRecords = {
         lines.push(`   🔴 ${r.userName} — ${timeString(r.checkin)}`)
       );
     }
-
+    if (lines.length === 0) return `✅ Không có bất thường nào ngày ${targetDate}.`;
     return `⚠️ Bất thường ngày ${targetDate}:\n${lines.join('\n')}`;
   },
 };
