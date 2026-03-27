@@ -1,4 +1,4 @@
-// src/tools/index.js — merge all 20 tools into ZALO_TOOLS[]
+// src/tools/index.js — merge all 24 tools into ZALO_TOOLS[]
 // Messaging (7)
 import { sendMessage } from './messaging/sendMessage.js';
 import { sendMedia } from './messaging/sendMedia.js';
@@ -25,6 +25,12 @@ import { getUserProfile } from './friend/getUserProfile.js';
 // DB (2)
 import { searchMessages } from './db/searchMessages.js';
 import { syncHistory } from './db/syncHistory.js';
+
+// Attendance Query (4)
+import { queryTodayCheckins } from './attendance/queryTodayCheckins.js';
+import { queryAttendanceHistory } from './attendance/queryAttendanceHistory.js';
+import { queryAttendanceSummary } from './attendance/queryAttendanceSummary.js';
+import { queryMissingRecords } from './attendance/queryMissingRecords.js';
 
 // Utility (1)
 import { getMyProfile } from './utility/getMyProfile.js';
@@ -53,6 +59,11 @@ export const ZALO_TOOLS = [
   // DB
   searchMessages,
   syncHistory,
+  // Attendance Query
+  queryTodayCheckins,
+  queryAttendanceHistory,
+  queryAttendanceSummary,
+  queryMissingRecords,
   // Utility
   getMyProfile,
 ];
