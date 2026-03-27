@@ -2,10 +2,14 @@ const PERMISSIONS = {
   employee: [
     'send_message', 'read_recent', 'search_users', 'get_user_profile',
     'get_my_profile', 'search_messages', 'send_media',
+    'query_today_checkins', 'query_attendance_history',
+    'query_attendance_summary', 'query_missing_records',
   ],
   manager: [
     'send_message', 'read_recent', 'search_users', 'get_user_profile',
     'get_my_profile', 'search_messages', 'send_media',
+    'query_today_checkins', 'query_attendance_history',
+    'query_attendance_summary', 'query_missing_records',
     'create_group_chat', 'add_group_members', 'remove_group_members',
     'rename_group', 'leave_group', 'list_groups', 'group_info',
     'list_members', 'react_message', 'delete_message', 'edit_message',
