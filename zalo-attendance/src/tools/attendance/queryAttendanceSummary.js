@@ -1,5 +1,4 @@
 import Attendance from '../../models/Attendance.js';
-import { User } from '../../models/index.js';
 
 function formatDuration(ms) {
   if (!ms) return '—';
@@ -80,7 +79,6 @@ export const queryAttendanceSummary = {
               ],
             },
           },
-          checkinTimes: { $push: '$checkin' },
         },
       },
       { $sort: { totalDays: -1 } },
