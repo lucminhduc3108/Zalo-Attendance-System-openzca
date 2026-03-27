@@ -14,41 +14,43 @@ let listenerProc = null;
 let restartCount = 0;
 let restarting = false;
 
+// ── Shared helpers (used by both listener and CLI runner) ──────────────────
+
+/** Platform-agnostic npm global bin directory. */
+const NPM_BIN = process.platform === 'win32'
+  ? join(os.homedir(), 'AppData', 'Roaming', 'npm')
+  : join(os.homedir(), '.npm-global', 'bin');
+
 /**
- * Expand ~ to the user's home directory (handles ~ in paths on Windows).
+ * Expand ~ to the user's home directory.
  */
-function expandTilde(path) {
-  if (path.startsWith('~/') || path === '~') {
-    return join(os.homedir(), path.slice(1));
-  }
+function expandPath(path) {
+  if (!path) return join(os.homedir(), '.openzca');
+  if (path.startsWith('~/') || path === '~') return join(os.homedir(), path.slice(1));
   return path;
 }
 
 /**
- * Resolve the zca binary path.
- * On Windows: bypass .cmd wrapper by invoking node.exe directly with the openzca entry.
- * On Linux/Mac: use the npm bin symlink.
+ * Resolve the openzca entry point for the current platform.
+ * Windows: bypass .cmd wrapper via node.exe → cli.js
+ * Linux/Mac: invoke npm bin symlink directly.
  */
-function getZaloBin() {
-  const npmBin = join(os.homedir(), 'AppData', 'Roaming', 'npm');
+function getZaloEntry() {
   if (process.platform === 'win32') {
-    // Bypass .cmd: invoke node directly with the openzca package entry
-    return join(npmBin, 'node_modules', 'openzca', 'dist', 'cli.js');
+    return join(NPM_BIN, 'node_modules', 'openzca', 'dist', 'cli.js');
   }
-  return join(npmBin, 'zca');
+  return join(NPM_BIN, 'zca');
 }
 
 /**
- * Spawn arguments for the platform.
- * On Windows: invoke node.exe directly with the openzca entry script.
- * On Linux/Mac: invoke the npm bin symlink directly.
+ * Build the env object for openzca processes (credentials + PATH).
  */
-function buildSpawnArgs(args) {
-  const bin = getZaloBin();
-  if (process.platform === 'win32') {
-    return { command: process.execPath, args: [bin, ...args] };
-  }
-  return { command: bin, args };
+function zaloEnv() {
+  return {
+    ...process.env,
+    OPENZCA_HOME: expandPath(config.openzcaHome),
+    PATH: process.env.PATH + (process.platform === 'win32' ? ';' : ':') + NPM_BIN,
+  };
 }
 
 /**
@@ -56,15 +58,15 @@ function buildSpawnArgs(args) {
  */
 function spawnListener() {
   const listenArgs = ['listen', '--webhook', WEBHOOK_URL, '--keep-alive'];
-  const { command, args } = buildSpawnArgs(listenArgs);
+  const entry = getZaloEntry();
+  const { command, args } = process.platform === 'win32'
+    ? { command: process.execPath, args: [entry, ...listenArgs] }
+    : { command: entry, args: listenArgs };
 
   const proc = spawn(command, args, {
     shell: false,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      OPENZCA_HOME: expandTilde(config.openzcaHome),
-    },
+    env: zaloEnv(),
   });
 
   proc.stdout?.on('data', (data) => {
@@ -93,7 +95,7 @@ function spawnListener() {
   });
 
   listenerProc = proc;
-  console.log(`[OPENZCA_RUNNER] ✅ openzca started (${command} ${args.join(' ')}) [restart #${restartCount}]`);
+  console.log(`[OPENZCA_RUNNER] ✅ openzca started (${command} ${listenArgs.join(' ')}) [restart #${restartCount}]`);
 }
 
 /**
@@ -144,4 +146,41 @@ export function stopListener() {
   listenerProc.kill('SIGTERM');
   listenerProc = null;
   console.log('[OPENZCA_RUNNER] Listener stopped.');
+}
+
+/**
+ * Run an openzca CLI command and return its stdout.
+ * @param {string[]} args - openzca subcommand args, e.g. ['msg', 'send', threadId, message]
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Promise<string>} stdout
+ */
+export async function runOpenzca(args, { timeoutMs = 15_000 } = {}) {
+  const entry = getZaloEntry();
+  const { command, args: spawnArgs } = process.platform === 'win32'
+    ? { command: process.execPath, args: [entry, ...args] }
+    : { command: entry, args };
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn(command, spawnArgs, {
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: zaloEnv(),
+    });
+
+    let stdout = '', stderr = '';
+    proc.stdout?.on('data', d => { stdout += d.toString(); });
+    proc.stderr?.on('data', d => { stderr += d.toString(); });
+
+    const timer = setTimeout(() => {
+      proc.kill('SIGTERM');
+      reject(new Error(`openzca timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(stdout.trim());
+      else reject(new Error(stderr.trim() || `openzca exited code ${code}`));
+    });
+    proc.on('error', err => { clearTimeout(timer); reject(err); });
+  });
 }
