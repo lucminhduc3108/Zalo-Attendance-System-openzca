@@ -1,0 +1,24 @@
+{
+  "name": "zalo-attendance",
+  "version": "1.0.0",
+  "description": "Hệ thống chấm công tự động qua Zalo",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": [
+    "zalo",
+    "attendance",
+    "opzca"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@google/genai": "^1.46.0",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "mongoose": "^8.15.0"
+  }
+}
