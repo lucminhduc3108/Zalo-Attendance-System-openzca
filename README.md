@@ -2,7 +2,7 @@
 
 Hệ thống chấm công tự động qua Zalo cho 20–200 nhân viên.
 
-Nhân viên nhắn `checkin` / `checkout` → hệ thống tự lưu vào MongoDB, phản hồi ngay qua Zalo. Mọi câu hỏi khác (danh sách vắng, thống kê...) được Claude AI xử lý.
+Nhân viên nhắn `checkin` / `checkout` → hệ thống tự lưu vào MongoDB, phản hồi ngay qua Zalo. Mọi câu hỏi khác được AI Agent xử lý qua tool-calling — có thể tạo group, tìm user, gửi tin nhắn, và truy vấn dữ liệu.
 
 ---
 
@@ -93,7 +93,7 @@ checkout đi gặp khách
 kết thúc
 ```
 
-### Hỏi thống kê (Claude AI)
+### Hỏi thống kê (AI Agent)
 ```
 Ai chưa checkin hôm nay?
 Ai checkout sớm hơn 17h?
@@ -109,23 +109,28 @@ Ai hay đi muộn?
 Nhân viên nhắn Zalo
          │
          ▼
-┌──────────────────────────────────┐
-│  openzca listen --webhook :3000   │  ← Realtime message stream
-│  POST /hook → Express server     │
-└─────────────┬────────────────────┘
-              │
-              ▼
-┌──────────────────────────────────┐
-│  Express.js (port 3000)          │
-│  POST /hook                      │
-│  ├── intentDetector (regex)       │
-│  │   ├── checkin → MongoDB.save   │
-│  │   └── checkout → MongoDB.update│
-│  └── unknown → Claude API → reply │
-└─────────────┬────────────────────┘
-              │
-              ▼
-    openzca msg send <threadId> <msg>
+┌──────────────────────────────────────┐
+│  openzca listen --webhook :3000     │  ← Realtime message stream
+│  POST /hook → Express server         │
+└──────────────┬───────────────────────┘
+               │
+               ▼
+┌──────────────────────────────────────┐
+│  Intent Detector (regex)              │
+│  checkin|checkout?                    │
+└──────┬─────────────────┬─────────────┘
+       │ Fast path       │ Slow path (AI Agent)
+       ▼                 ▼
+┌──────────────┐  ┌──────────────────────────────────┐
+│ attendance   │  │ zaloAgent                        │
+│ Service      │  │ 1. Gemini chọn tool              │
+│ (checkin/    │  │ 2. Execute tool (openzca/MongoDB)│
+│  checkout)   │  │ 3. Loop (max 5)                  │
+└──────┬───────┘  └──────┬───────────────────────────┘
+       │                  │
+       └────────┬─────────┘
+                ▼
+      openzca msg send → Phản hồi Zalo
 ```
 
 ---
@@ -168,7 +173,7 @@ Nhân viên nhắn Zalo
 | Double checkin | Cảnh báo: đã checkin lúc XX:XX |
 | Checkout không checkin | Cảnh báo: chưa checkin hôm nay |
 | MongoDB down | Reply "Hệ thống tạm bảo trì" |
-| Claude API fail | Reply "Đang bảo trì, thử lại sau" |
+| Gemini API fail | Reply "Đang bảo trì, thử lại sau" |
 | Duplicate msgId | Skip, không xử lý lại |
 | User chưa đăng ký | Auto-register với zaloName |
 | openzca crash | Auto-restart sau 5s (tối đa 10 lần) |
@@ -220,5 +225,5 @@ Health check endpoint.
 
 - **express** — HTTP server
 - **mongoose** — MongoDB ODM
-- **@anthropic-ai/sdk** — Claude AI
+- **@google/genai** — Google Gemini AI
 - **dotenv** — ENV loader
