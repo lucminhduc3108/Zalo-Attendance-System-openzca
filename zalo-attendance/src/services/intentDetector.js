@@ -1,7 +1,7 @@
 /**
  * intentDetector — Regex-based intent classification.
  * Only checkin/checkout are handled locally.
- * Everything else returns 'unknown' → Claude takes over.
+ * Everything else returns 'agent' → zaloAgent takes over.
  */
 
 const CHECKIN_PATTERN = /^(checkin|điểm danh|start|in)\b/i;
@@ -9,7 +9,7 @@ const CHECKOUT_PATTERN = /^(checkout|out|off|kết thúc)\b/i;
 
 export function detectIntent(content) {
   if (!content || typeof content !== 'string') {
-    return 'unknown';
+    return 'agent';
   }
 
   const trimmed = content.trim();
@@ -22,5 +22,5 @@ export function detectIntent(content) {
     return 'checkout';
   }
 
-  return 'unknown';
+  return 'agent';
 }
