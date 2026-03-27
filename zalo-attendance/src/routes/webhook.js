@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 import { detectIntent } from '../services/intentDetector.js';
 import { checkin, checkout } from '../services/attendanceService.js';
 import { sendMessage } from '../services/zaloSender.js';
-import { askClaude } from '../services/claudeService.js';
+import { runAgent } from '../services/zaloAgent.js';
 import { User } from '../models/index.js';
 
 export const webhookRouter = express.Router();
@@ -89,15 +89,15 @@ async function processPayload(payload) {
     return { handled: true, intent };
   }
 
-  // ── 5. Unknown intent: delegate to Claude ─────────────────────────────
+  // ── 5. Agent intent: delegate to AI agent ─────────────────────────────
   try {
-    const reply = await askClaude(content, sender);
+    const reply = await runAgent(content, sender, threadId);
     await safeSend(threadId, reply, isGroup);
-    return { handled: true, intent: 'claude' };
+    return { handled: true, intent: 'agent' };
   } catch (err) {
-    console.error('[WEBHOOK] Claude delegation error:', err.message);
+    console.error('[WEBHOOK] Agent delegation error:', err.message);
     await safeSend(threadId, '🔧 Đang bảo trì, thử lại sau nhé!', isGroup);
-    return { handled: false, reason: 'claude_error' };
+    return { handled: false, reason: 'agent_error' };
   }
 }
 
