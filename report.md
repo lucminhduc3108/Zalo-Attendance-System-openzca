@@ -1,431 +1,270 @@
-# 📋 Zalo Attendance System — Project Report
-
-> **Ngày tạo:** 2026-03-26
-> **Version:** 1.0.0
-> **Mục tiêu:** Tự động hóa chấm công qua Zalo cho 20–200 nhân viên
+# Báo cáo Triển khai: Hệ thống Chấm công Zalo Tích hợp AI
 
 ---
 
-## 1. Kiến Trúc Hệ Thống (Tổng Quan)
+## 1. Tổng quan phương án (Overview)
+
+**Phương án:** Xây dựng hệ thống chấm công tự động qua tin nhắn Zalo, tích hợp AI Agent để hỗ trợ nhân viên trả lời câu hỏi và quản lý nhóm.
+
+**Vấn đề giải quyết:**
+
+Trong một số nhóm ngành dịch vụ ngắn hạn, doanh nghiệp có xu hướng thuê nhân viên theo ngắn hạn. Việc quản lý nhóm nhân viên này theo cách truyền thống như sử dụng máy vân tay hoặc quét mặt thường tốn công sức và chi phí.
+
+| Phương pháp truyền thống | Hạn chế |
+|---|---|
+| Máy vân tay | Tắc nghẽn giờ cao điểm, không check-in từ xa, dễ lỗi thiết bị |
+| Máy quét mặt | Chi phí cao, cần cài đặt tại chỗ, không phù hợp nhân viên thời vụ |
+| Excel / Google Sheets thủ công | Tốn thời gian, dễ sai sót, không cập nhật realtime |
+
+**Đối tượng khách hàng:** Các doanh nghiệp hay sử dụng nhân viên thời vụ (nhân viên có thời gian làm ngắn, ít hơn so với nhân viên chính thức).
+
+---
+
+## 2. Mục tiêu (Objectives)
+
+### Mục tiêu chức năng (Functional)
+
+- Nhân viên nhắn `checkin` / `checkout` qua Zalo → hệ thống tự ghi nhận và lưu vào database
+- Xác nhận trạng thái phản hồi ngay qua Zalo
+- Tổng hợp số liệu chấm công theo ngày / tháng
+- AI Agent trả lời câu hỏi của nhân viên (ví dụ: "Ai chưa checkin hôm nay?", "Tổng hợp tuần này")
+- Tự động nhắc nhở checkin/checkout
+
+### Mục tiêu phi chức năng (Non-functional)
+
+- **Hiệu năng:** Checkin/checkout phản hồi dưới 2 giây (fast path — không qua AI)
+- **Chi phí:** Tối thiểu, chỉ sử dụng Gemini API free tier
+- **Độ ổn định:** Chạy trên máy local, tự khởi động lại nếu openzca bị lỗi
+- **Mở rộng:** Dễ dàng thêm tool mới cho AI Agent (tạo group, gửi tin nhắn, tìm user...)
+
+---
+
+## 3. Ý tưởng & nguyên lý hoạt động (Concept / Approach)
+
+Hệ thống hoạt động theo nguyên lý **AI Tool-Calling Agent**:
+
+1. **Nhân viên nhắn tin** cho Zalo account đã đăng nhập trên openzca
+2. **openzca CLI** lắng nghe realtime → gửi webhook POST `/hook` đến Express server
+3. **Intent Detector** (regex) phân loại intent:
+   - `checkin` / `checkout` → **Fast path**: ghi DB → reply ngay (không qua AI)
+   - Câu hỏi khác → **Slow path**: AI Agent xử lý
+4. **AI Agent (slow path):** Gemini chọn tool phù hợp → execute → loop (max 5 vòng) → reply Zalo
+5. **openzca msg send** → phản hồi tin nhắn qua Zalo
+
+---
+
+## 4. Kiến trúc hệ thống (System Architecture)
 
 ```
 Nhân viên nhắn Zalo
          │
          ▼
-┌──────────────────────────────────────────────────┐
-│  🌐 ZALO LAYER                                   │
-│  openzca listen --webhook http://localhost:3000/hook
-│  (subprocess, auto-restart khi crash)
-└──────────────────────────┬───────────────────────┘
-                           │ HTTP POST /hook
-                           ▼
-┌──────────────────────────────────────────────────┐
-│  ⚙️  BACKEND LAYER (Express.js — port 3000)       │
-│  1. Validate payload (msgId, senderId, content)  │
-│  2. Skip duplicate msgId (in-memory Set)         │
-│  3. Auto-register user (nếu chưa có)             │
-│  4. Intent detection (regex)                     │
-│     ├── checkin  → attendanceService.checkin()    │
-│     ├── checkout → attendanceService.checkout()  │
-│     └── unknown  → askClaude() (Gemini AI)        │
-│  5. Reply via zaloSender → openzca msg send      │
-└──────────────────────────┬───────────────────────┘
-                           │
-              ┌────────────┴────────────┐
-              ▼                         ▼
-┌──────────────────────────┐  ┌──────────────────────────┐
-│  📦 DATABASE LAYER       │  │  🤖 AI LAYER             │
-│  MongoDB Atlas           │  │  Google Gemini API       │
-│  ├── users collection    │  │  Model: gemini-3-flash   │
-│  └── attendances         │  │  Xử lý: câu hỏi thống kê │
-└──────────────────────────┘  └──────────────────────────┘
+┌──────────────────────────────────────┐
+│  openzca listen --webhook            │
+│  POST /hook → Express server         │
+└──────────────┬───────────────────────┘
+               │
+               ▼
+┌──────────────────────────────────────┐
+│  Intent Detector v2 (regex)           │
+│  checkin|checkout?                   │
+└──────┬─────────────────┬─────────────┘
+       │ Fast path       │ Slow path (AI Agent)
+       ▼                 ▼
+┌──────────────┐  ┌──────────────────────────────────┐
+│ attendance   │  │ zaloAgent                       │
+│ Service      │  │ 1. Gemini chọn tool             │
+│ (checkin/    │  │ 2. Execute tool (openzca/MongoDB│
+│  checkout)   │  │ 3. Loop (max 5)                 │
+└──────┬───────┘  └──────┬───────────────────────────┘
+       │                  │
+       └────────┬─────────┘
+                ▼
+      openzca msg send → Phản hồi Zalo
 ```
 
----
+### Các thành phần chính
 
-## 2. Các Thành Phần Hệ Thống
-
-### 🤖 AI Layer
-
-| Thành phần | File | Mô tả |
-|-----------|------|--------|
-| **Gemini API** | `src/services/claudeService.js` | Gọi Gemini để trả lời câu hỏi thống kê chấm công |
-| **System Prompt** | `src/prompts/attendancePrompt.js` | Hướng dẫn AI trả lời tiếng Việt, ngắn gọn, đúng ngữ cảnh |
-
-> **AI Layer xử lý:** Những intent không phải `checkin`/`checkout` — ví dụ: "Ai chưa checkin hôm nay?", "Tổng hợp tuần này", "Ai hay đi muộn?"
+| Thành phần | Mô tả |
+|---|---|
+| **openzca CLI** | CLI tool mã nguồn mở (MIT), miễn phí 100%, lắng nghe realtime và gửi/nhận tin nhắn Zalo |
+| **Express Server** | Nhận webhook, routing intent, chạy trên port 3000 |
+| **Intent Detector** | Regex phân loại fast path vs slow path |
+| **attendanceService** | Xử lý checkin/checkout, ghi MongoDB |
+| **zaloAgent** | AI Agent loop dùng Gemini tool-calling |
+| **MongoDB Atlas** | Lưu trữ dữ liệu nhân viên và bản ghi chấm công |
 
 ---
 
-### ⚙️ Backend Layer (Node.js / Express)
+## 5. Quy trình xử lý (Workflow / Sequence)
 
-| Thành phần | File | Mô tả |
-|-----------|------|--------|
-| **Entry Point** | `src/index.js` | Kết nối MongoDB → start Express server + openzca listener |
-| **Webhook Handler** | `src/routes/webhook.js` | Nhận payload từ openzca, điều phối intent, deduplicate msgId, safeSend reply |
-| **Config Loader** | `src/config/index.js` | Load biến môi trường: port, MONGO_URI, GEMINI_API_KEY, OPENZCA_HOME |
-| **Intent Detector** | `src/services/intentDetector.js` | Regex phân loại intent: checkin / checkout / unknown |
-| **Attendance Service** | `src/services/attendanceService.js` | Logic CRUD checkin & checkout: tạo record, tính thời gian, trích note, validate |
-| **Zalo Sender** | `src/services/zaloSender.js` | Spawn subprocess `openzca msg send` để gửi reply về Zalo |
-| **openzca Runner** | `src/utils/openzcaRunner.js` | Quản lý subprocess `openzca listen`: spawn, auto-restart (5s, max 10 lần), stop gracefully |
+**Bước 1 — Nhân viên gửi tin nhắn**
+Nhân viên mở Zalo, nhắn `checkin`, `checkout`, hoặc câu hỏi khác.
 
----
+**Bước 2 — openzca nhận tin nhắn**
+openzca CLI đang chạy `listen --webhook`, nhận tin nhắn realtime và gửi POST request đến Express server (`http://localhost:3000/hook`).
 
-### 📦 Database Layer (MongoDB Atlas)
+**Bước 3 — Intent Detection**
+Webhook parse payload, gọi `intentDetector(content)`:
+- Nếu match regex `checkin|điểm danh|start|in` → Fast path
+- Nếu match regex `checkout|out|off|kết thúc` → Fast path (checkout)
+- Không match → Slow path (AI Agent)
 
-| Thành phần | File | Schema |
-|-----------|------|--------|
-| **User Model** | `src/models/User.js` | Lưu thông tin nhân viên: zaloId, zaloName, role, department, isActive |
-| **Attendance Model** | `src/models/Attendance.js` | Lưu bản ghi chấm công: zaloId, date, checkin, checkout, status, notes |
-
-> **Database Layer xử lý:** Lưu trữ & truy vấn dữ liệu users và attendances. Unique index trên `{ zaloId + date }`.
-
----
-
-### 🌐 Zalo Transport Layer (openzca CLI)
-
-| Thành phần | Lệnh | Mô tả |
-|-----------|------|--------|
-| **Listener** | `openzca listen --webhook http://localhost:3000/hook --keep-alive` | Real-time nhận tin nhắn Zalo → POST webhook |
-| **Message Sender** | `openzca msg send <threadId> <msg>` | Gửi phản hồi về Zalo (DM hoặc group) |
-
----
-
-### 📁 File & Thư Mục
-
+**Bước 4a — Fast path (checkin/checkout)**
 ```
-zalo-attendance/
-├── src/
-│   ├── index.js              ← Entry point
-│   ├── config/
-│   │   └── index.js          ← ENV loader
-│   ├── routes/
-│   │   └── webhook.js        ← POST /hook
-│   ├── services/
-│   │   ├── intentDetector.js  ← Regex intent classifier
-│   │   ├── attendanceService.js ← CRUD checkin/checkout
-│   │   ├── claudeService.js  ← Gemini API caller
-│   │   └── zaloSender.js     ← openzca msg send wrapper
-│   ├── models/
-│   │   ├── index.js          ← Re-export
-│   │   ├── User.js           ← User schema
-│   │   └── Attendance.js     ← Attendance schema
-│   ├── utils/
-│   │   └── openzcaRunner.js  ← Subprocess manager
-│   └── prompts/
-│       └── attendancePrompt.js ← System prompt cho AI
-├── .env.example
-├── package.json
-└── README.md
+attendanceService.checkin() / checkout()
+  → Tạo hoặc cập nhật bản ghi trong MongoDB
+  → Trả lời ngay qua Zalo (VD: "Đã checkin lúc 08:00")
 ```
 
----
-
-## 4. Tổng Quan
-
-Nhân viên nhắn tin Zalo (`checkin`/`checkout`) → hệ thống tự lưu vào MongoDB và phản hồi ngay. Mọi câu hỏi khác (danh sách vắng, thống kê...) được Gemini AI xử lý.
-
-### Người dùng mục tiêu
-- Nhân viên công ty (20–200 người)
-- chỉ cần nhắn Zalo
-
-### Quy mô & Nền tảng
-- **Chạy trên:** Máy local (Windows/Mac)
-- **Quy mô:** 20–200 nhân viên
-
----
-
-## 5. Tech Stack
-
-| Layer | Công nghệ | Phiên bản |
-|-------|-----------|-----------|
-| Runtime | Node.js 18+ | — |
-| HTTP Server | Express.js | ^5.1.0 |
-| Database | MongoDB Atlas (Mongoose ODM) | ^8.15.0 |
-| AI | Google Gemini API (`@google/genai`) | ^1.46.0 |
-| Zalo Transport | `openzca` CLI (npm global) | latest |
-| ENV | dotenv | ^16.5.0 |
-
-> **Lưu ý:** README ghi nhầm là `@anthropic-ai/sdk` và `ANTHROPIC_API_KEY`. Code thực tế dùng **`@google/genai`** + **`GEMINI_API_KEY`**.
-
----
-
----
-
-## 7. Cấu Trúc File Chi Tiết
-
+**Bước 4b — Slow path (AI Agent)**
 ```
-zalo-attendance/
-├── src/
-│   ├── index.js              ← Entry point: kết nối MongoDB → start Express + listener
-│   ├── config/
-│   │   └── index.js          ← Load ENV (port, MONGO_URI, GEMINI_API_KEY, OPENZCA_HOME)
-│   ├── routes/
-│   │   └── webhook.js        ← POST /hook — nhận payload từ openzca, điều phối intent
-│   ├── services/
-│   │   ├── intentDetector.js  ← Regex phân loại: checkin | checkout | unknown
-│   │   ├── attendanceService.js ← CRUD checkin/checkout với MongoDB
-│   │   ├── claudeService.js  ← Gọi Gemini API cho intent "unknown"
-│   │   └── zaloSender.js     ← Wrapper spawn `openzca msg send`
-│   ├── models/
-│   │   ├── index.js          ← Re-export User + Attendance
-│   │   ├── User.js           ← Mongoose schema: nhân viên
-│   │   └── Attendance.js      ← Mongoose schema: bản ghi chấm công
-│   ├── utils/
-│   │   └── openzcaRunner.js  ← Spawn `openzca listen` subprocess + auto-restart
-│   └── prompts/
-│       └── attendancePrompt.js ← System prompt tiếng Việt cho Gemini
-├── .env.example
-├── package.json
-└── README.md
+zaloAgent.runAgent(message, sender)
+  1. Gửi message + tools definitions + system prompt → Gemini
+  2. Gemini chọn tool phù hợp (VD: send_message, search_users, query_today_checkins...)
+  3. Execute tool (openzca CLI / MongoDB)
+  4. Append kết quả vào conversation
+  5. Lặp lại (max 5 vòng)
+  6. Trả final text → reply Zalo
 ```
 
----
-
-## 8. Chi Tiết Từng Module
-
-### 5.1 `src/config/index.js`
-Load biến môi trường qua `dotenv`. Cung cấp:
-- `port` (default: 3000)
-- `mongoUri` (default: `mongodb://localhost:27017/zalo-attendance`)
-- `geminiApiKey`
-- `openzcaHome` (default: `~/.openzca`)
-
-### 5.2 `src/routes/webhook.js`
-- **POST `/hook`** — endpoint nhận payload từ `openzca listen`
-- **In-memory deduplication:** `processedIds` Set (max 10.000, tự cleanup nửa khi đầy)
-- **Auto-register user:** tạo bản ghi `User` mới nếu `zaloId` chưa có
-- **Intent routing:**
-  - `checkin` → `attendanceService.checkin()` → reply
-  - `checkout` → `attendanceService.checkout()` → reply
-  - `unknown` → `askClaude()` → reply hoặc fallback message
-- **Error handling:**
-  - MongoDB down → `safeSend()` reply "Hệ thống tạm bảo trì" + HTTP 503
-  - Claude fail → reply "Đang bảo trì" + HTTP 500
-- **`safeSend()`:** wrapper bắt lỗi send, không crash webhook
-
-### 5.3 `src/services/intentDetector.js`
-Phân loại intent bằng regex (không cần AI):
-
-| Intent | Pattern |
-|--------|---------|
-| `checkin` | `/^(checkin\|điểm danh\|start\|in)\b/i` |
-| `checkout` | `/^(checkout\|out\|off\|kết thúc)\b/i` |
-| `unknown` | Mọi thứ còn lại → chuyển Gemini |
-
-### 5.4 `src/services/attendanceService.js`
-**`checkin(sender, content)`:**
-1. Auto-register user
-2. Kiểm tra double checkin → warn nếu đã checkin hôm nay
-3. Tạo Attendance record với `status: 'missing_checkout'`
-4. Trích note sau keyword (`"checkin làm ở nhà"` → note = `"làm ở nhà"`)
-5. Reply: emoji 🌅/👋 tùy giờ, thời gian, ngày, note
-
-**`checkout(sender, content)`:**
-1. Auto-register user
-2. Tìm Attendance hôm nay theo `zaloId + date`
-3. Cảnh báo nếu chưa checkin hoặc đã checkout
-4. Cập nhật `checkout`, `checkoutNote`, `status: 'completed'`
-5. Tính tổng thời gian làm việc (hours + minutes) → reply
-
-### 5.5 `src/services/claudeService.js`
-**`askClaude(question, sender)`:**
-1. Build rich context từ MongoDB (top 100 records gần nhất + danh sách user active)
-2. Gọi Gemini API với model `gemini-3-flash-preview`
-3. Trả về text reply từ Gemini
-4. Fallback: "🤖 API key chưa được cấu hình" nếu thiếu key
-
-### 5.6 `src/services/zaloSender.js`
-- **`sendMessage(threadId, message, { isGroup, timeoutMs })`**
-- Spawn `openzca msg send <threadId> <msg> [--group]`
-- Platform-aware: Windows dùng `cmd /c zca.cmd`, Linux/Mac dùng `zca`
-- 15 giây timeout mặc định, auto-kill process
-- Message được wrap quote trên Windows để tránh bị cmd.exe split argument
-
-### 5.7 `src/models/User.js`
-```javascript
-{
-  zaloId: String (unique, required),
-  zaloName: String (required),
-  alias: String (nullable),
-  role: 'employee' | 'manager' (default: 'employee'),
-  department: String (default: ''),
-  registeredAt: Date (default: now),
-  isActive: Boolean (default: true),
-  timestamps: true  // createdAt, updatedAt
-}
-```
-
-### 5.8 `src/models/Attendance.js`
-```javascript
-{
-  zaloId: String (required),
-  userName: String (required),
-  date: String (required, "YYYY-MM-DD"),
-  checkin: Date (default: null),
-  checkinNote: String (default: ''),
-  checkout: Date (default: null),
-  checkoutNote: String (default: ''),
-  status: 'completed' | 'missing_checkout' (default: 'missing_checkout'),
-  timestamps: true
-}
-// Index: { zaloId: 1, date: 1 } (unique)
-```
-
-### 5.9 `src/utils/openzcaRunner.js`
-- **`startListener()`** — spawn `openzca listen --webhook http://localhost:3000/hook --keep-alive`
-  - Idempotent (skip nếu đã chạy)
-  - Platform-aware: Windows → `cmd /c zca.cmd`, Unix → `zca`
-- **`stopListener()`** — kill subprocess, set `restarting = false`
-- **Auto-restart:** nếu process crash/exit → restart sau 5s
-  - Tối đa 10 lần restart, sau đó dừng và log lỗi
-  - `restarting` flag ngăn restart chồng nhau
-- stdout/stderr của subprocess được pipe ra terminal với prefix `[openzca|out]` / `[openzca|err]`
-
-### 5.10 `src/prompts/attendancePrompt.js`
-System prompt cho Gemini — hướng dẫn AI:
-- Trả lời tiếng Việt, có emoji, ngắn gọn (5–7 dòng)
-- Cách query MongoDB (date format, field names)
-- 5 loại câu hỏi thường gặp và cách trả lời
-- Từ chối nếu câu hỏi không liên quan chấm công
+**Bước 5 — Phản hồi Zalo**
+`openzca msg send` gửi tin nhắn phản hồi đến nhân viên qua Zalo.
 
 ---
 
-## 9. Data Flow Hoàn Chỉnh
+## 6. Công nghệ sử dụng (Tech Stack)
 
-```
-1. User nhắn "checkin" trên Zalo
-       ↓
-2. openzca nhận message → POST /hook
-       ↓
-3. webhook.js: validate payload
-       ↓
-4. webhook.js: deduplicate msgId (Set)
-       ↓
-5. webhook.js: ensureUser() → auto-register nếu mới
-       ↓
-6. intentDetector: detectIntent("checkin") → "checkin"
-       ↓
-7. attendanceService.checkin()
-   ├── Tạo Attendance record { zaloId, date, checkin, status: 'missing_checkout' }
-   └── Trả về message string
-       ↓
-8. zaloSender: safeSend(threadId, message)
-   → spawn `openzca msg send <threadId> <message>`
-       ↓
-9. User nhận reply Zalo: "✅ Checkin thành công! ..."
-```
+| Layer | Công nghệ | Ghi chú |
+|---|---|---|
+| **Runtime** | Node.js 22+ (ESM) | Yêu cầu openzca |
+| **Server** | Express.js | Webhook endpoint |
+| **Database** | MongoDB Atlas | Free tier 512MB, cloud |
+| **AI** | Google Gemini API | `@google/genai` SDK |
+| **Zalo Transport** | openzca CLI | Mã nguồn mở, MIT, miễn phí |
+| **Config** | dotenv | ENV loader |
+
+### openzca — Tính năng chính
+
+| Tính năng | Mô tả |
+|---|---|
+| Gửi / nhận tin nhắn | Realtime qua Zalo account đã login |
+| Quản lý nhóm & bạn bè | Tạo group, thêm thành viên, rename, leave |
+| Lắng nghe sự kiện realtime | Webhook / socket để nhận tin nhắn liên tục |
+
+> **Lưu ý:** openzca không phải API chính thức của Zalo (unofficial), là tool mã nguồn mở miễn phí 100%.
 
 ---
 
-## 10. Error Handling
+## 7. Đánh giá phương án (Evaluation)
 
-| Scenario | Handling |
-|----------|----------|
-| Payload thiếu trường | Skip, log warn, return `{ handled: false }` |
-| Duplicate msgId | Skip (Set deduplication) |
-| MongoDB down | Reply "🔧 Hệ thống tạm bảo trì" + HTTP 503 |
-| Gemini API fail | Reply "🔧 Đang bảo trì" + HTTP 500 |
-| openzca listener crash | Auto-restart sau 5s, tối đa 10 lần |
-| Double checkin | Reply warn, không tạo record mới |
-| Checkout không checkin | Reply warn "chưa checkin hôm nay" |
-| openzca msg send timeout (15s) | Reject, log warn |
-| User chưa đăng ký | Auto-create User với zaloName |
+### Ưu điểm
 
----
+- **Không cần cài app:** Người Việt Nam hầu như đều dùng Zalo — nhân viên chỉ cần nhắn tin, không cần cài thêm ứng dụng
+- **Triển khai nhanh:** Chỉ cần máy local + Zalo account + openzca login
+- **Giảm chi phí thiết bị:** Không cần máy vân tay, máy quét mặt
+- **Giảm thời gian quản lý nhân sự:** Tự động ghi nhận, tổng hợp số liệu
+- **Fast path tối ưu chi phí:** Checkin/checkout không qua AI → tiết kiệm API call
+- **Mở rộng linh hoạt:** Dễ dàng thêm tool mới cho AI Agent (gửi tin nhắn, tạo group, tìm user...)
+- **Chi phí vận hành thấp:** MongoDB Atlas free tier + Gemini free tier
 
-## 11. Các Bước Triển Khai Hệ Thống
+### Nhược điểm
 
-Phần này trình bày chi tiết các bước để triển khai hệ thống chấm công Zalo từ đầu, phù hợp cho người phụ trách kỹ thuật hoặc quản trị viên.
-
----
-
-### Bước 1: Chuẩn bị các tài khoản và công cụ cần thiết
-
-Trước khi bắt đầu, cần đảm bảo đã có đầy đủ các tài khoản và phần mềm sau trên máy chủ hoặc máy tính cục bộ dự định chạy hệ thống.
-
-**Về phần mềm nền tảng**, máy cần được cài đặt Node.js phiên bản 18 trở lên. Có thể tải và cài đặt từ trang chủ nodejs.org. Sau khi cài xong, xác nhận phiên bản bằng lệnh `node -v` trong terminal.
-
-**Về cơ sở dữ liệu**, hệ thống sử dụng MongoDB Atlas — dịch vụ MongoDB trên đám mây có gói miễn phí 512MB, phù hợp cho quy mô 20–200 nhân viên. Cần tạo một tài khoản MongoDB Atlas tại mongodb.com, tạo một cluster mới (chọn khu vực gần Việt Nam như Singapore hoặc Jakarta để giảm độ trễ), tạo một database có tên `zalo-attendance`, và tạo một người dùng database (database user) với quyền đọc/ghi. Ghi lại chuỗi kết nối (connection string) có dạng `mongodb+srv://<user>:<pass>@<cluster>.mongodb.net/zalo-attendance` để sử dụng ở bước sau.
-
-**Về Zalo**, cần có một tài khoản Zalo đã đăng nhập trên máy chạy hệ thống. Tài khoản này sẽ được sử dụng làm "tài khoản chấm công" — nhân viên sẽ nhắn tin đến tài khoản này để thực hiện checkin và checkout.
-
-**Về API AI**, hệ thống sử dụng Google Gemini API để xử lý các câu hỏi thống kê từ nhân viên. Cần đăng ký tài khoản Google Cloud và bật Gemini API, sau đó tạo một API key từ Google AI Studio. API key này sẽ được đặt trong file cấu hình ở bước tiếp theo.
+- **Phụ thuộc openzca CLI:** Tool bên thứ ba, có thể bị lỗi hoặc thay đổi
+- **Cần máy local luôn bật:** Nếu máy tắt, nhân viên không chấm công được
+- **MongoDB free tier giới hạn 512MB:** Phù hợp 20-200 nhân viên, cần nâng cấp nếu mở rộng
+- **openzca unofficial:** Không phải API chính thức Zalo — không có SLA đảm bảo
 
 ---
 
-### Bước 2: Tải mã nguồn và cài đặt các thư viện phụ thuộc
+## 8. Rủi ro & giải pháp (Risks & Mitigation)
 
-Sau khi đã có đầy đủ các tài khoản cần thiết, bước tiếp theo là tải mã nguồn về máy và cài đặt các thư viện. Từ thư mục gốc của project, chạy lệnh `npm install` để Node.js tự động tải và cài đặt tất cả các thư viện được liệt kê trong file `package.json`, bao gồm Express.js, Mongoose, Google Gemini SDK và dotenv.
-
-Tiếp theo, cài đặt công cụ dòng lệnh openzca một cách toàn cục bằng lệnh `npm i -g openzca@latest`. Đây là công cụ do cộng đồng phát triển, đóng vai trò cầu nối giữa ứng dụng và Zalo — cho phép nhận tin nhắn real-time và gửi phản hồi về Zalo thông qua dòng lệnh.
-
----
-
-### Bước 3: Xác thực tài khoản Zalo với openzca
-
-Sau khi openzca được cài đặt, cần đăng nhập tài khoản Zalo vào openzca để ứng dụng có quyền đọc và gửi tin nhắn. Chạy lệnh `openzca auth login` trên máy chạy hệ thống. openzca sẽ hiển thị một mã QR trên terminal. Mở ứng dụng Zalo trên điện thoại, quét mã QR đó để xác thực. Quá trình xác thực chỉ cần thực hiện một lần. Lưu ý rằng phiên đăng nhập có thể hết hạn sau một khoảng thời gian nhất định và cần được làm mới.
-
----
-
-### Bước 4: Tạo và cấu hình file biến môi trường
-
-Hệ thống sử dụng file `.env` để lưu trữ các thông tin nhạy cảm như chuỗi kết nối database và API key. File này không được đưa lên git vì chứa thông tin bí mật. Để tạo file, sao chép nội dung từ file mẫu `.env.example` đã có sẵn trong project, sau đó điền các giá trị thực tế.
-
-Cụ thể, cần khai báo bốn biến chính. Biến `MONGO_URI` nhận chuỗi kết nối MongoDB Atlas đã chuẩn bị ở Bước 1. Biến `GEMINI_API_KEY` nhận API key của Google Gemini. Biến `PORT` xác định cổng chạy Express server, mặc định là 3000. Biến `OPENZCA_HOME` trỏ đến thư mục lưu trữ cấu hình và phiên đăng nhập của openzca, thường để mặc định là `~/.openzca`.
+| Rủi ro kỹ thuật | Giải pháp |
+|---|---|
+| openzca thay đổi command/API | Hardcode command với retry logic, cập nhật khi có phiên bản mới |
+| Gemini API rate limit | Exponential backoff, fast path giảm số lượng API call |
+| MongoDB Atlas down | Reply "Hệ thống tạm bảo trì" cho nhân viên |
+| openzca bị crash | Auto-restart sau 5s, tối đa 10 lần |
+| Double checkin (spam) | Kiểm tra bản ghi hôm nay, cảnh báo nếu đã checkin |
+| Máy local tắt / mất internet | Nhân viên không chấm công được → thông báo cho quản lý |
 
 ---
 
-### Bước 5: Khởi động hệ thống
+## 9. Chi phí & tài nguyên (Cost & Resources)
 
-Sau khi hoàn tất bốn bước trên, hệ thống đã sẵn sàng để chạy. Có hai chế độ khởi động. Chế độ thứ nhất dành cho môi trường sản xuất, chạy lệnh `npm start` — chương trình sẽ kết nối đến MongoDB Atlas, khởi động Express server trên cổng 3000, và tự động spawn subprocess `openzca listen` để bắt đầu lắng nghe tin nhắn từ Zalo. Chế độ thứ hai dành cho quá trình phát triển và kiểm tra, chạy lệnh `npm run dev` — tương tự nhưng bổ sung tính năng tự tải lại mã nguồn mỗi khi có thay đổi, giúp developer không cần khởi động lại thủ công.
+| Hạng mục | Chi phí |
+|---|---|
+| MongoDB Atlas | Miễn phí (free tier 512MB) |
+| Gemini API | Miễn phí (free tier — đủ cho team 20-200 người) |
+| openzca CLI | Miễn phí (MIT, mã nguồn mở) |
+| Máy chủ / máy local | Chi phí máy hiện có |
+| **Tổng chi phí vận hành** | **~0 đồng / tháng** |
 
-Nếu khởi động thành công, terminal sẽ hiển thị các thông báo xác nhận đã kết nối MongoDB, Express server đang lắng nghe trên cổng 3000, và openzca listener đã được khởi chạy.
-
----
-
-### Bước 6: Kiểm tra hệ thống
-
-Để xác nhận hệ thống hoạt động đúng, mở trình duyệt web và truy cập địa chỉ `http://localhost:3000/`. Nếu nhận được phản hồi JSON có dạng `{ "status": "ok", "message": "Zalo Attendance System running" }`, đồng nghĩa Express server đã khởi động thành công.
-
-Tiếp theo, thử gửi một tin nhắn `checkin` từ ứng dụng Zalo đến tài khoản đã đăng nhập ở Bước 3. Nếu hệ thống hoạt động đúng, tài khoản Zalo đó sẽ nhận được phản hồi tự động có nội dung xác nhận checkin thành công kèm theo thời gian và ngày. Tương tự, thử gửi `checkout` để kiểm tra luồng checkout.
-
-Nếu gửi một tin nhắn không phải checkin hoặc checkout, ví dụ "Ai chưa checkin hôm nay?", hệ thống sẽ chuyển tin nhắn đó sang Gemini API và trả lời bằng nội dung thống kê tương ứng.
-
----
-
-### Bước 7: Vận hành và mở rộng (nếu cần)
-
-Trong quá trình vận hành thực tế, cần lưu ý một số điểm sau. Thứ nhất, nếu muốn expose server ra internet để nhân viên ở các địa điểm khác nhau có thể truy cập mà không cùng mạng nội bộ, cần sử dụng một công cụ như ngrok để tạo public URL cho cổng 3000. Khi đó, cần cập nhật lại webhook URL trong lệnh khởi chạy openzca để trỏ đến URL công khai của ngrok thay vì localhost. Thứ hai, phiên đăng nhập Zalo trong openzca có thể hết hạn — nếu hệ thống ngừng nhận và gửi tin nhắn, cần chạy lại `openzca auth login` để làm mới phiên. Thứ ba, cần sao lưu định kỳ dữ liệu trên MongoDB Atlas, đặc biệt khi hệ thống đã hoạt động lâu dài với nhiều bản ghi chấm công. Thứ tư, với quy mô lớn hơn 200 nhân viên, nên cân nhắc nâng cấp từ gói MongoDB miễn phí sang gói trả phí để đảm bảo hiệu năng.
+| Tài nguyên | Yêu cầu |
+|---|---|
+| Nhân lực phát triển | 1 người |
+| Máy chạy hệ thống | Windows/Mac có openzca đã login Zalo |
+| Kết nối internet | Cần để gửi webhook + gọi Gemini API |
 
 ---
 
-## 12. Scripts Vận Hành
+## 10. Kế hoạch triển khai (Implementation Plan)
+
+### Các chức năng cơ bản đã triển khai
+
+- ✅ Checkin / Checkout qua tin nhắn Zalo
+- ✅ Xác nhận trạng thái và lưu vào MongoDB
+- ✅ Tổng hợp số liệu theo ngày / tháng (AI Agent query tools)
+- ✅ AI Agent trả lời câu hỏi (Gemini tool-calling loop)
+- ✅ 20 tools cho AI Agent (messaging, group, friend, db, utility)
+- ✅ Permission layer (employee / manager roles)
+
+### Phase tiếp theo
+
+| Phase | Nội dung | Trạng thái |
+|---|---|---|
+| Phase 1 | Tool Interface Layer (20 tools) | ✅ Hoàn thành |
+| Phase 2 | Agent Core (Gemini tool-calling loop) | ✅ Hoàn thành |
+| Phase 3 | Intent Detector v2 + Webhook routing | ✅ Hoàn thành |
+| Phase 4 | Error handling + edge cases | ⬜ Chưa hoàn thành |
+| Phase 5 | Polish & documentation | ⬜ Chưa hoàn thành |
+
+### Demo hiện tại
+
+Hệ thống core đã chạy end-to-end:
+- ✅ `checkin` → fast path → MongoDB → reply Zalo
+- ✅ `checkout` → fast path → MongoDB → reply Zalo
+- ✅ Câu hỏi khác → AI Agent → Gemini tool-calling → reply Zalo
+- ✅ 1-2 tools đã test thực tế (gửi tin nhắn, tạo group)
 
 ---
 
-## 13. Các Lưu Ý Quan Trọng
+## 11. Kết luận & đề xuất (Conclusion & Recommendation)
 
-1. **README nhầm AI provider:** Ghi `@anthropic-ai/sdk` + `ANTHROPIC_API_KEY`, nhưng code thực tế dùng `@google/genai` + `GEMINI_API_KEY`. Cần cập nhật README để trùng khớp.
+### Có nên chọn phương án này không?
 
-2. **openzca CLI vs openzalo plugin:** Hệ thống dùng `openzca` CLI standalone, không phải `@tuyenhx/openzalo` (plugin OpenClaw).
+**Có — đặc biệt phù hợp với đối tượng khách hàng mục tiêu:**
 
-3. **Webhook URL cho local:** Nếu chạy local không có public IP, cần ngrok để expose port 3000, sau đó truyền URL vào `openzca listen --webhook`.
+Các doanh nghiệp sử dụng nhân viên thời vụ (làm việc ngắn hạn, ít hơn nhân viên chính thức) sẽ hưởng lợi lớn từ hệ thống này. Phương án này giải quyết trực tiếp các vấn đề của phương pháp truyền thống:
 
-4. **Platform-aware:** `openzcaRunner.js` và `zaloSender.js` xử lý riêng Windows (`cmd /c zca.cmd`) và Unix (`zca`) để tránh DEP0190 và argument-splitting.
+- Không cần mua/thiết lập thiết bị vân tay/mặt
+- Nhân viên chỉ cần nhắn tin Zalo — ai cũng biết dùng
+- Chi phí vận hành gần như bằng 0
+- Triển khai nhanh trong vài giờ
 
-5. **Deduplication strategy:** In-memory Set (max 10.000) — không persist qua restart. Lý tưởng cho demo/local; production nên dùng Redis.
+### Áp dụng trong trường hợp nào?
 
-6. **Gemini model:** `gemini-3-flash-preview` — model mới nhất tại thời điểm code, có thể cần cập nhật tên model khi Gemini ra bản stable.
+- ✅ Team 20-200 nhân viên thời vụ
+- ✅ Nhân viên có điện thoại thông minh dùng Zalo
+- ✅ Cần giải pháp nhanh, chi phí thấp
+- ⚠️ Không phù hợp nếu cần uptime 24/7 cao (phụ thuộc máy local)
+
+### Khuyến nghị
+
+1. **Ngắn hạn:** Hoàn thành Phase 4-5 để hệ thống production-ready (error handling, nhắc nhở tự động)
+2. **Dài hạn:** Cân nhắc deploy lên cloud (VPS/server) thay vì máy local để đảm bảo uptime cao hơn
+3. **Mở rộng:** Thêm tính năng tự động nhắc nhở checkin/checkout hàng ngày qua Zalo
 
 ---
 
-## 14. Dependencies (package.json)
-
-```json
-{
-  "@google/genai": "^1.46.0",
-  "dotenv": "^16.5.0",
-  "express": "^5.1.0",
-  "mongoose": "^8.15.0"
-}
-```
+*Lần cập nhật cuối: 2026-03-27*

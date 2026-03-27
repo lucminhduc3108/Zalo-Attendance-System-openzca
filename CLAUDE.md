@@ -21,12 +21,6 @@ Xây dựng hệ thống tự động hóa **chấm công** qua Zalo cho 20-200 
 
 ---
 
-## Implementation Status
-
-> **Phase 3 ✅** (2026-03-27): intentDetector.js, webhook.js routing, claudeService.js deleted. All 3 phases complete.
-
----
-
 ## Architecture
 
 ### Kiến trúc Tổng quan — AI Tool-Calling Agent
@@ -97,7 +91,7 @@ Intent Detector (regex)
 AI tự chọn tool dựa trên description. Xem chi tiết trong `PLAN.md`.
 
 ```
-Tool Registry (15 tools)
+Tool Registry (20 tools)
 ├── Messaging: send_message, send_media, react_message,
 │             read_recent, delete_message, edit_message, forward_message
 ├── Group: create_group_chat, add_group_members, remove_group_members,
@@ -108,6 +102,19 @@ Tool Registry (15 tools)
 
 Attendance = Fast path riêng, KHÔNG trong tool registry
 ```
+
+### Attendance Query Tools (trong prompt)
+
+Khi user hỏi về chấm công, AI được hướng dẫn dùng tool query để lấy dữ liệu:
+
+| Prompt trigger | Tool |
+|----------------|------|
+| "Ai đã checkin hôm nay?", "Danh sách checkin hôm nay" | `query_today_checkins` |
+| "Lịch sử chấm công của An", "Xem lịch sử tháng 3" | `query_attendance_history` |
+| "Tổng hợp chấm công tháng này" | `query_attendance_summary` |
+| "Ai đi muộn hôm nay?", "Ai chưa checkout?", "Ai chưa checkin hôm nay" | `query_missing_records` |
+
+> **Note**: Các tool query chưa implement trong code — đang nằm trong `assistantPrompt.js` như hướng dẫn cho AI. Cần tạo tool thực sự để truy vấn MongoDB.
 
 ---
 
@@ -193,16 +200,6 @@ openzca listen → POST /hook
     └── Response 200 → openzca
 ```
 
-## Intent Rules
-
-| Intent | Pattern | Route |
-|--------|---------|-------|
-| `checkin` | `/^(checkin\|điểm danh\|start\|in)\b/i` | Fast path → attendanceService |
-| `checkout` | `/^(checkout\|out\|off\|kết thúc)\b/i` | Fast path → attendanceService |
-| `agent` | Mọi thứ khác | Slow path → zaloAgent (AI Tool-Calling) |
-
----
-
 ## openzca CLI Reference
 
 > **Phân biệt**: `openzca` (CLI standalone) vs `openzalo` (plugin OpenClaw — KHÔNG dùng)
@@ -239,36 +236,41 @@ Xem thêm file c:\Users\admin\Desktop\OpenZalo\openzcaREADME.md để biết rõ
 }
 ```
 
----
+## Implementation Status
 
-## Environment Variables
+> **Phase 3 ✅** (2026-03-27): intentDetector.js, webhook.js routing, claudeService.js deleted. All 3 phases complete.
 
-Tạo file `.env` (KHÔNG commit):
+### Debug Session 2026-03-27 — SDK Bugs Fixed
 
-```env
-MONGO_URI=mongodb+srv://<user>:<pass>@<cluster>.mongodb.net/zalo-attendance
-GEMINI_API_KEY=AIzaSy...
-PORT=3000
-LISTEN_PORT=3000
-OPENZCA_HOME=~/.openzca
-AGENT_MAX_LOOPS=5
+**Bug 1**: `tools` phải nằm trong `config` parameter (không ở root level).
+
+```js
+// Sai
+ai.models.generateContent({ model, contents, tools, systemInstruction })
+
+// Đúng
+ai.models.generateContent({ model, contents, config: { tools, systemInstruction } })
 ```
 
----
+**Bug 2**: `createModelContent` nhận `Part[]`, không phải `{role, parts: Part[]}`.
 
-## Error Handling
+```js
+// Sai — truyền nhầm role wrapper
+createModelContent([{ role: 'user', parts: [{ functionResponse: {...} }] }])
 
-| Scenario | Handling |
-|----------|----------|
-| MongoDB down | Reply "Hệ thống tạm bảo trì, thử lại sau" |
-| Gemini API fail | Reply "Đang bảo trì, thử lại sau" |
-| openzca listener down | Auto-restart subprocess |
-| User chưa đăng ký | Auto-register với zaloName |
-| Double checkin | Warn và không tạo bản ghi mới |
-| Duplicate msgId | Skip, không xử lý lại |
-| Tool execution error | Graceful error message, continue loop |
-| Permission denied | Clear message: "Chỉ quản lý mới có quyền" |
-| Agent max loop reached | "Hệ thống đã xử lý nhưng chưa hoàn thành" |
+// Đúng — Part thuần
+createModelContent([{ functionResponse: { name, response } }])
+```
+
+### Verification Checklist
+
+| Test | Status |
+|------|--------|
+| `"checkin"` → fast path | ✅ Pass |
+| `"checkout"` → fast path | ✅ Pass |
+| `"gửi tin nhắn cho Minh Đức: chào bạn"` → tool chain | ✅ Pass |
+| `"liệt kê các nhóm chat"` → `list_groups` | ✅ Pass |
+| `"liệt kê danh sách bạn bè"` → `search_users` → `send_message` | ✅ Pass |
 
 ---
 
@@ -276,8 +278,9 @@ AGENT_MAX_LOOPS=5
 
 - Code style: ESM (import/export), async/await
 - Logging: console.log với prefix `[SERVICE_NAME]`
-- Reply messages: Tiếng Việt, có emoji
+- Reply messages: Tiếng Việt, không emoji (theo assistantPrompt)
 - Payload validation: Check required fields (msgId, senderId, content)
 - Tool definitions: Mỗi tool = 1 file, có name, description, params schema, execute()
 - Agent loop: max 5 vòng để tránh infinite loop
 - Avoid: Không commit `.env`, không hardcode credentials
+- Không viết vào file CLAUDE.md nếu không có sự cho phép của tôi

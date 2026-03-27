@@ -1,4 +1,4 @@
-import { GoogleGenAI, createModelContent } from '@google/genai';
+import { GoogleGenAI } from '@google/genai';
 import config from '../config/index.js';
 import { TOOL_REGISTRY } from './toolRegistry.js';
 import { checkPermission, getUserRole } from './permissionService.js';
@@ -17,16 +17,14 @@ const ai = new GoogleGenAI({ apiKey: config.geminiApiKey });
  */
 export async function runAgent(userMessage, sender, threadId) {
   if (!config.geminiApiKey) {
-    return '🤖 API key chưa được cấu hình. Liên hệ quản trị viên để bổ sung.';
+    return 'API key chua duoc cau hinh. Lien he quan tri vien de bo sung.';
   }
 
   const role = await getUserRole(sender.zaloId);
   const toolDefs = [...TOOL_REGISTRY.values()].map(toolToGemini);
-
-  // Build tools config — all tools wrapped in {functionDeclarations: [...]} objects
   const tools = toolDefs;
 
-  // Conversation history: starts with user message as ModelContent (Part array)
+  // Conversation history: starts with user message
   const conversation = [
     {
       role: 'user',
@@ -46,12 +44,14 @@ export async function runAgent(userMessage, sender, threadId) {
       },
     });
 
-    if (!result?.candidates?.[0]?.content?.parts?.length) {
+    const content = result?.candidates?.[0]?.content;
+
+    if (!content?.parts?.length) {
       console.warn(`[ZALO_AGENT] Loop ${loop}: empty/invalid response from Gemini`);
       break;
     }
 
-    const parts = result.candidates[0].content.parts;
+    const parts = content.parts;
 
     // Separate text parts from function call parts
     const textParts = parts.filter((p) => p.text);
@@ -61,10 +61,13 @@ export async function runAgent(userMessage, sender, threadId) {
     if (!fcParts.length) {
       const text = textParts.map((p) => p.text).join('');
       console.log(`[ZALO_AGENT] Loop ${loop}: text response (${text.length} chars)`);
-      return text || 'Đã xử lý xong.';
+      return text || 'Da xu ly xong.';
     }
 
-    // ── Function calls ─────────────────────────────────────────────────────
+    // ── Push model response ONCE (preserves thoughtSignature) ─────────────
+    conversation.push(content);
+
+    // ── Function calls: execute each and append functionResponse ──────────
     for (const fcPart of fcParts) {
       const fc = fcPart.functionCall;
       const toolName = fc.name;
@@ -73,34 +76,34 @@ export async function runAgent(userMessage, sender, threadId) {
 
       console.log(`[ZALO_AGENT] Loop ${loop}: calling ${toolName}(${JSON.stringify(toolArgs)})`);
 
-      // Check tool exists
+      // Tool not found
       const tool = TOOL_REGISTRY.get(toolName);
       if (!tool) {
         console.warn(`[ZALO_AGENT] Loop ${loop}: tool "${toolName}" not found`);
-        conversation.push(createModelContent([fcPart]));
-        conversation.push(
-          createModelContent([{
+        conversation.push({
+          role: 'user',
+          parts: [{
             functionResponse: {
               name: toolName,
               response: { error: `Tool "${toolName}" not found.` },
             },
-          }])
-        );
+          }],
+        });
         continue;
       }
 
-      // Check permission
+      // Permission denied
       if (!checkPermission(role, toolName)) {
         console.warn(`[ZALO_AGENT] Loop ${loop}: permission denied for "${toolName}" (role=${role})`);
-        conversation.push(createModelContent([fcPart]));
-        conversation.push(
-          createModelContent([{
+        conversation.push({
+          role: 'user',
+          parts: [{
             functionResponse: {
               name: toolName,
               response: { error: 'Permission denied. Only managers can use this tool.' },
             },
-          }])
-        );
+          }],
+        });
         continue;
       }
 
@@ -114,19 +117,19 @@ export async function runAgent(userMessage, sender, threadId) {
 
       console.log(`[ZALO_AGENT] Loop ${loop}: ${toolName} → ${String(toolResult).substring(0, 100)}`);
 
-      // Append function call + result as proper Part objects (no role wrapper)
-      conversation.push(createModelContent([fcPart]));
-      conversation.push(
-        createModelContent([{
+      // Append functionResponse with user role (required by Gemini API)
+      conversation.push({
+        role: 'user',
+        parts: [{
           functionResponse: {
             id: fcId,
             name: toolName,
             response: { result: toolResult },
           },
-        }])
-      );
+        }],
+      });
     }
   }
 
-  return '⏳ Hệ thống đã xử lý nhưng chưa hoàn thành. Vui lòng thử lại.';
+  return 'He thong da xu ly nhung chua hoan thanh. Vui long thu lai.';
 }
