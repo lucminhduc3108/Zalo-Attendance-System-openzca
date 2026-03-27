@@ -41,9 +41,12 @@ export const queryMissingRecords = {
 
     const allRecords = await Attendance.find({ date: targetDate }).lean();
 
+    // Derived datasets — computed once, reused across all type branches
+    const missingCheckout = allRecords.filter((r) => r.status === 'missing_checkout');
+    const lateRecords = allRecords.filter((r) => isLate(r.checkin));
+
     // missing_checkout: have checkin but no checkout
     if (type === 'missing_checkout' || type === 'all') {
-      const missingCheckout = allRecords.filter((r) => r.status === 'missing_checkout');
       if (type === 'missing_checkout') {
         if (missingCheckout.length === 0)
           return `✅ Tất cả nhân viên đã checkout ngày ${targetDate}.`;
@@ -55,7 +58,6 @@ export const queryMissingRecords = {
     }
 
     // late: checkin after 9:00 AM
-    const lateRecords = allRecords.filter((r) => isLate(r.checkin));
     if (type === 'late') {
       if (lateRecords.length === 0) return `✅ Không có ai đi muộn ngày ${targetDate}.`;
       const lines = lateRecords.map(
@@ -80,7 +82,6 @@ export const queryMissingRecords = {
     }
 
     // "all" type: return all categories
-    const missingCheckout = allRecords.filter((r) => r.status === 'missing_checkout');
 
     if (missingCheckout.length === 0 && lateRecords.length === 0) {
       return `✅ Không có bất thường nào ngày ${targetDate}.`;
